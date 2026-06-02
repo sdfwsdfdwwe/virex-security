@@ -1,3 +1,0 @@
-[build]
-nixpacks.pkgs = ["libopus", "libffi", "openssl"]
-
