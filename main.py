@@ -503,6 +503,14 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
 
 @bot.event
 async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
+    # ── FIX: If a log channel was deleted, remove it from cache and stop here.
+    # This prevents the bot from instantly recreating it.
+    guild_cache = log_channel_cache[channel.guild.id]
+    for key, ch_id in list(guild_cache.items()):
+        if ch_id == channel.id:
+            del guild_cache[key]
+            return  # Don't log or recreate our own log channels
+
     embed = make_embed(
         "🗑️ Channel Deleted",
         f"Channel **#{channel.name}** was deleted.",
@@ -1128,7 +1136,6 @@ async def on_command_error(ctx, error):
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Holt das Token sicher aus den Railway-Umgebungsvariablen
     token = os.getenv("DISCORD_TOKEN")
     
     if not token:
