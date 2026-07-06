@@ -4,10 +4,13 @@ Discord Moderation Bot
 Features:
 - Anti-Spam: If a user sends more than 3 messages within 5 seconds,
   they receive a 1 minute timeout. All spam messages get deleted.
-- Anti-Link: Any message containing a link gets deleted automatically.
-- Logging: Every action (spam timeout, link deletion) is logged into
-  a log channel. The log channel ID can be set with a simple command
-  and is stored permanently in config.json (survives restarts on Railway).
+- Anti-Link: Any message containing a link gets deleted automatically,
+  AND the user receives a 1 minute timeout.
+- Whitelist Roles: Members with a whitelisted role are exempt from
+  both anti-spam and anti-link moderation.
+- Logging: Every action (spam timeout, link deletion/timeout) is logged
+  into a log channel. Config (log channel + whitelisted roles) is stored
+  permanently in config.json (survives restarts on Railway).
 
 Setup:
 1. Set the environment variable DISCORD_TOKEN (your bot token) in Railway.
@@ -16,7 +19,12 @@ Setup:
 3. In any channel, run:  !setlog <channel_id>
    (only usable by members with "Manage Guild" / Administrator permission)
    This tells the bot where to send its log messages.
-4. Done. The bot will now moderate spam and links automatically.
+4. Run: !whitelistroles <role_id>
+   (only usable by members with "Manage Guild" / Administrator permission)
+   This adds a role to the whitelist. Members with this role are exempt
+   from anti-spam and anti-link moderation. Run it again with the same
+   role ID to remove it from the whitelist (toggle behavior).
+5. Done. The bot will now moderate spam and links automatically.
 """
 
 import os
@@ -39,6 +47,8 @@ SPAM_MESSAGE_LIMIT = 3        # more than this many messages...
 SPAM_TIME_WINDOW = 5          # ...within this many seconds...
 SPAM_TIMEOUT_DURATION = 60    # ...triggers a timeout of this many seconds (1 minute)
 
+LINK_TIMEOUT_DURATION = 60    # timeout duration (seconds) for posting a link
+
 # Simple regex to detect links (http/https URLs, www. links, discord invites, etc.)
 LINK_REGEX = re.compile(
     r"(https?://\S+|www\.\S+|discord\.gg/\S+|discordapp\.com/invite/\S+)",
@@ -49,8 +59,13 @@ LINK_REGEX = re.compile(
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    return {"log_channel_id": None}
+            data = json.load(f)
+    else:
+        data = {}
+    # Ensure defaults / backward compatibility with older config files
+    data.setdefault("log_channel_id", None)
+    data.setdefault("whitelist_role_ids", [])
+    return data
 
 
 def save_config(config):
@@ -95,6 +110,17 @@ async def send_log(guild: discord.Guild, embed: discord.Embed):
         print("No log channel configured yet. Use !setlog <channel_id>.")
 
 
+def is_whitelisted(member: discord.Member) -> bool:
+    """Check whether a member has any whitelisted role."""
+    if not isinstance(member, discord.Member):
+        return False
+    whitelisted_ids = set(config.get("whitelist_role_ids", []))
+    if not whitelisted_ids:
+        return False
+    member_role_ids = {role.id for role in member.roles}
+    return not whitelisted_ids.isdisjoint(member_role_ids)
+
+
 # ---------------------------------------------------------------------------
 # EVENTS
 # ---------------------------------------------------------------------------
@@ -118,12 +144,18 @@ async def on_message(message: discord.Message):
     if isinstance(message.author, discord.Member) and message.author.guild_permissions.administrator:
         return
 
+    # Skip moderation for whitelisted roles
+    if is_whitelisted(message.author):
+        return
+
     guild = message.guild
 
     # -----------------------------------------------------------------
     # 1) ANTI-LINK CHECK
     # -----------------------------------------------------------------
     if LINK_REGEX.search(message.content):
+        member = message.author
+
         try:
             await message.delete()
         except discord.NotFound:
@@ -131,20 +163,39 @@ async def on_message(message: discord.Message):
         except discord.Forbidden:
             print("Missing permissions to delete messages.")
 
+        timeout_until = discord.utils.utcnow() + timedelta(seconds=LINK_TIMEOUT_DURATION)
+        try:
+            await member.timeout(timeout_until, reason="Posting a link")
+            timeout_success = True
+        except discord.Forbidden:
+            timeout_success = False
+        except discord.HTTPException:
+            timeout_success = False
+
         embed = discord.Embed(
-            title="🔗 Link Deleted",
-            description=f"A message containing a link was removed.",
+            title="🔗 Link Deleted — User Timed Out",
+            description="A message containing a link was removed.",
             color=discord.Color.orange(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.add_field(name="User", value=f"{message.author.mention} (`{message.author.id}`)", inline=False)
+        embed.add_field(name="User", value=f"{member.mention} (`{member.id}`)", inline=False)
         embed.add_field(name="Channel", value=message.channel.mention, inline=False)
         embed.add_field(name="Content", value=message.content[:1000] or "*(empty)*", inline=False)
+        embed.add_field(
+            name="Action",
+            value=(
+                f"Timed out for {LINK_TIMEOUT_DURATION} seconds (1 minute)."
+                if timeout_success
+                else "⚠️ Could not apply timeout (missing permissions)."
+            ),
+            inline=False,
+        )
         await send_log(guild, embed)
 
         try:
             await message.channel.send(
-                f"{message.author.mention} links are not allowed here. Your message was deleted.",
+                f"{member.mention} links are not allowed here. Your message was deleted "
+                f"and you've been timed out for 1 minute.",
                 delete_after=5,
             )
         except discord.Forbidden:
@@ -240,7 +291,7 @@ async def setlog(ctx: commands.Context, channel_id: str):
     await ctx.send(f"✅ Log channel set to {channel.mention}.")
     embed = discord.Embed(
         title="✅ Log Channel Configured",
-        description=f"This channel will now receive moderation logs.",
+        description="This channel will now receive moderation logs.",
         color=discord.Color.green(),
         timestamp=datetime.now(timezone.utc),
     )
@@ -255,11 +306,65 @@ async def setlog_error(ctx, error):
         await ctx.send("Usage: `!setlog <channel_id>`")
 
 
+@bot.command(name="whitelistroles")
+@commands.has_permissions(manage_guild=True)
+async def whitelistroles(ctx: commands.Context, role_id: str):
+    """
+    Toggle a role on/off the whitelist. Usage: !whitelistroles <role_id>
+    Members with a whitelisted role are exempt from anti-spam and anti-link moderation.
+    """
+    try:
+        role_id_int = int(role_id)
+    except ValueError:
+        await ctx.send("Please provide a valid role ID (numbers only).")
+        return
+
+    role = ctx.guild.get_role(role_id_int)
+    if role is None:
+        await ctx.send("I can't find a role with that ID in this server.")
+        return
+
+    whitelisted_ids = config.setdefault("whitelist_role_ids", [])
+
+    if role_id_int in whitelisted_ids:
+        whitelisted_ids.remove(role_id_int)
+        save_config(config)
+        await ctx.send(f"➖ Role {role.mention} removed from the moderation whitelist.")
+    else:
+        whitelisted_ids.append(role_id_int)
+        save_config(config)
+        await ctx.send(f"✅ Role {role.mention} added to the moderation whitelist.")
+
+    embed = discord.Embed(
+        title="🛡️ Whitelist Updated",
+        description=f"Role: {role.mention}\nStatus: {'Whitelisted' if role_id_int in whitelisted_ids else 'Removed from whitelist'}",
+        color=discord.Color.blue(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    await send_log(ctx.guild, embed)
+
+
+@whitelistroles.error
+async def whitelistroles_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("You need `Manage Server` permission to use this command.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Usage: `!whitelistroles <role_id>`")
+
+
 @bot.command(name="status")
 async def status(ctx: commands.Context):
     """Show current bot configuration."""
     channel_id = config.get("log_channel_id")
     channel = ctx.guild.get_channel(int(channel_id)) if channel_id else None
+
+    whitelisted_ids = config.get("whitelist_role_ids", [])
+    role_mentions = []
+    for rid in whitelisted_ids:
+        role = ctx.guild.get_role(int(rid))
+        if role:
+            role_mentions.append(role.mention)
+    roles_text = ", ".join(role_mentions) if role_mentions else "None set (use `!whitelistroles <role_id>`)"
 
     embed = discord.Embed(title="🤖 Bot Status", color=discord.Color.blurple())
     embed.add_field(
@@ -272,7 +377,12 @@ async def status(ctx: commands.Context):
         value=f"More than {SPAM_MESSAGE_LIMIT} messages in {SPAM_TIME_WINDOW}s → {SPAM_TIMEOUT_DURATION}s timeout",
         inline=False,
     )
-    embed.add_field(name="Link Filter", value="Enabled (all links are deleted)", inline=False)
+    embed.add_field(
+        name="Link Filter",
+        value=f"Enabled (message deleted + {LINK_TIMEOUT_DURATION}s timeout)",
+        inline=False,
+    )
+    embed.add_field(name="Whitelisted Roles", value=roles_text, inline=False)
     await ctx.send(embed=embed)
 
 
