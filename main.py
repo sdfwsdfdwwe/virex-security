@@ -39,12 +39,9 @@ BRAND_LOGO             = os.getenv("BRAND_LOGO", "").strip()        # https:// i
 BRAND_COLOR            = int(os.getenv("BRAND_COLOR", "1A6FFF"), 16)
 
 # Banner image shown at the bottom of the /panel embed (like the "CONTACT US" banner).
-# Two ways to set it:
-#   1) PANEL_IMAGE_URL = a https:// link to an already-hosted image
-#   2) PANEL_IMAGE_FILE = a local file path (e.g. "banner.png") placed next to bot.py —
-#      the bot will upload it itself. If both are set, the local file takes priority.
+# Set this to a direct https:// image link. Easiest way to get one:
+# upload the image in any Discord channel, right-click it -> "Copy Link".
 PANEL_IMAGE_URL        = os.getenv("PANEL_IMAGE_URL", "").strip()
-PANEL_IMAGE_FILE       = os.getenv("PANEL_IMAGE_FILE", "").strip()
 
 # ------------------------------------------------------------
 # Dropdown categories — edit this list to whatever you need.
@@ -458,21 +455,10 @@ async def cmd_panel(interaction: discord.Interaction):
     )
     set_logo(embed)
     embed.set_footer(text=f"{BRAND_NAME} • Ticket System")
-
-    # Attach the banner image, either from a local file (uploaded fresh each time)
-    # or from a hosted URL. Local file takes priority if both are set.
-    file = None
-    if PANEL_IMAGE_FILE and os.path.exists(PANEL_IMAGE_FILE):
-        filename = os.path.basename(PANEL_IMAGE_FILE)
-        file = discord.File(PANEL_IMAGE_FILE, filename=filename)
-        embed.set_image(url=f"attachment://{filename}")
-    elif PANEL_IMAGE_URL:
+    if PANEL_IMAGE_URL:
         embed.set_image(url=PANEL_IMAGE_URL)
 
-    if file is not None:
-        await interaction.channel.send(embed=embed, view=TicketPanelView(), file=file)
-    else:
-        await interaction.channel.send(embed=embed, view=TicketPanelView())
+    await interaction.channel.send(embed=embed, view=TicketPanelView())
     await interaction.followup.send("✅ Panel sent!", ephemeral=True)
 
 
