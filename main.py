@@ -54,8 +54,8 @@ TICKET_WELCOME_TEXT = (
     "issue/inquiry, and provide clear screenshots if an error has occurred.\n\n"
     "If you are a customer, please try to get assistance from other "
     "customers before opening a ticket.\n\n"
-    "**NO STAFF WILL REQUEST THE TRANSFER OF A TICKET TO DMS FOR "
-    "PAYMENTS. CONTACT MANAGEMENT IF THIS HAPPENS!**"
+    "**NO MOD WILL REQUEST THE TRANSFER OF A TICKET TO DMS FOR "
+    "PAYMENTS. CONTACT A MANAGEMENT IF THIS HAPPENS!**"
 )
 
 # ------------------------------------------------------------
@@ -329,13 +329,30 @@ class TicketQuestionsModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         # Now safe to defer — channel creation can take >3s.
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await create_ticket_channel(
-            interaction,
-            cat_key=self.cat_key,
-            reason=self.reason.value.strip(),
-            order_id=self.order_id.value.strip(),
-            product=self.product.value.strip(),
-        )
+        try:
+            await create_ticket_channel(
+                interaction,
+                cat_key=self.cat_key,
+                reason=self.reason.value.strip(),
+                order_id=self.order_id.value.strip(),
+                product=self.product.value.strip(),
+            )
+        except Exception as e:
+            print(f"[TICKET CREATE ERROR] {type(e).__name__}: {e}")
+            try:
+                await interaction.followup.send(f"❌ Something went wrong creating your ticket: {e}", ephemeral=True)
+            except discord.HTTPException:
+                pass
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        print(f"[TICKET MODAL ERROR] {type(error).__name__}: {error}")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ An error occurred: {error}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ An error occurred: {error}", ephemeral=True)
+        except discord.HTTPException:
+            pass
 
 
 async def create_ticket_channel(interaction: discord.Interaction, cat_key: str, reason: str, order_id: str, product: str):
@@ -415,12 +432,22 @@ class TicketPanelView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(TicketSelect())
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        print(f"[TICKET PANEL VIEW ERROR] {type(error).__name__}: {error}")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ An error occurred: {error}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ An error occurred: {error}", ephemeral=True)
+        except discord.HTTPException:
+            pass
+
 
 class TicketControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="ticket_close_button")
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="ticket_close_button")
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         info = config["tickets"].get(str(interaction.channel.id))
         if not info:
@@ -432,6 +459,16 @@ class TicketControlView(discord.ui.View):
         await interaction.response.send_message("🔒 Closing in 5 seconds...")
         await asyncio.sleep(5)
         await close_ticket(interaction.channel, interaction.guild, closed_by=interaction.user)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        print(f"[TICKET CONTROL VIEW ERROR] {type(error).__name__}: {error}")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ An error occurred: {error}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ An error occurred: {error}", ephemeral=True)
+        except discord.HTTPException:
+            pass
 
 
 # ============================================================
