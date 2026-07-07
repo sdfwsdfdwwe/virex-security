@@ -45,14 +45,32 @@ PANEL_IMAGE_URL        = os.getenv("PANEL_IMAGE_URL", "").strip()
 
 # ------------------------------------------------------------
 # Dropdown categories — edit this list to whatever you need.
-# key: internal id (used in channel topics, don't change once live)
+# key: internal id (used in channel names/topics, don't change once live)
 # label/description/emoji: shown in the dropdown
+# category_env: the Railway variable name that holds the Discord parent
+#               category ID this ticket type's channels get created under.
+#               If that variable is empty/unset, TICKET_CATEGORY_ID (the
+#               default fallback below) is used instead.
 # ------------------------------------------------------------
 TICKET_CATEGORIES = {
-    "support":  {"label": "General Support", "description": "Get help from our staff.",        "emoji": "🎫"},
-    "purchase": {"label": "Purchase",          "description": "Request help with a purchase.",   "emoji": "🛒"},
-    "other":    {"label": "Other",             "description": "Anything else.",                  "emoji": "❓"},
+    "support":  {"label": "General Support", "description": "Get help from our staff.",       "emoji": "🎫", "category_env": "TICKET_CATEGORY_ID_SUPPORT"},
+    "purchase": {"label": "Purchase",         "description": "Request help with a purchase.",  "emoji": "🛒", "category_env": "TICKET_CATEGORY_ID_PURCHASE"},
+    "other":    {"label": "Other",            "description": "Anything else.",                 "emoji": "❓", "category_env": "TICKET_CATEGORY_ID_OTHER"},
 }
+
+
+def get_category_parent(guild: discord.Guild, cat_key: str):
+    """Return the Discord category (channel group) a ticket of this type
+    should be created under: its own configured category if set, otherwise
+    the default TICKET_CATEGORY_ID fallback."""
+    cat_info = TICKET_CATEGORIES.get(cat_key, {})
+    env_name = cat_info.get("category_env")
+    specific_id = os.getenv(env_name, "").strip() if env_name else ""
+    chosen_id = specific_id if specific_id else str(TICKET_CATEGORY_ID or "")
+    if not chosen_id:
+        return None
+    channel = guild.get_channel(int(chosen_id))
+    return channel if isinstance(channel, discord.CategoryChannel) else None
 
 CONFIG_FILE = "tickets.json"
 
@@ -284,15 +302,17 @@ class TicketSelect(discord.ui.Select):
                                                    manage_channels=True, read_message_history=True),
         }
 
-        parent_category = guild.get_channel(TICKET_CATEGORY_ID)
+        parent_category = get_category_parent(guild, cat_key)
         config["ticket_counter"] = config.get("ticket_counter", 0) + 1
         num = config["ticket_counter"]
 
+        channel_name = f"{slugify(cat_key)}-{slugify(interaction.user.name)}"
+
         try:
             channel = await guild.create_text_channel(
-                name=f"ticket-{num:04d}",
+                name=channel_name,
                 overwrites=overwrites,
-                category=parent_category if isinstance(parent_category, discord.CategoryChannel) else None,
+                category=parent_category,
                 topic=f"uid-{interaction.user.id} | {cat_key} | open",
             )
         except discord.HTTPException as e:
@@ -511,18 +531,17 @@ async def cmd_tstatus(interaction: discord.Interaction):
     guild = interaction.guild
     log_channel = guild.get_channel(TRANSCRIPT_CHANNEL_ID)
     staff_role = guild.get_role(STAFF_ROLE_ID)
-    parent_category = guild.get_channel(TICKET_CATEGORY_ID)
 
     embed = discord.Embed(title="🤖 Ticket Bot Status", color=BRAND_COLOR)
     embed.add_field(name="Log Channel", value=log_channel.mention if log_channel else "⚠️ Not set / invalid", inline=False)
     embed.add_field(name="Support Role", value=staff_role.mention if staff_role else "⚠️ Not set / invalid", inline=False)
-    embed.add_field(
-        name="Ticket Category",
-        value=parent_category.name if isinstance(parent_category, discord.CategoryChannel) else "⚠️ Not set / invalid",
-        inline=False,
-    )
-    cat_text = "\n".join(f"{v['emoji']} {v['label']}" for v in TICKET_CATEGORIES.values())
-    embed.add_field(name="Dropdown Categories", value=cat_text, inline=False)
+
+    cat_lines = []
+    for key, v in TICKET_CATEGORIES.items():
+        parent = get_category_parent(guild, key)
+        cat_lines.append(f"{v['emoji']} **{v['label']}** → {parent.name if parent else '⚠️ Not set / invalid'}")
+    embed.add_field(name="Categories & their Discord Category", value="\n".join(cat_lines), inline=False)
+
     embed.add_field(name="Open Tickets", value=str(len(config["tickets"])), inline=False)
     embed.add_field(
         name="Auto-Close",
