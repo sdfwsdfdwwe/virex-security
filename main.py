@@ -43,6 +43,21 @@ PANEL_IMAGE_URL        = os.getenv("PANEL_IMAGE_URL", "").strip()
 # Banner image shown inside the welcome embed when a NEW ticket channel opens.
 TICKET_OPEN_IMAGE_URL  = os.getenv("TICKET_OPEN_IMAGE_URL", "").strip()
 
+# The main body text shown in every new ticket's welcome embed (edit freely).
+# {brand} gets replaced with BRAND_NAME automatically.
+TICKET_WELCOME_TEXT = (
+    "Thank you for creating a support ticket. While you wait for a support "
+    "agent to promptly assist you in your inquiry, please state the "
+    "following information.\n\n"
+    "**While you wait...**\n"
+    "👤 While you wait for a support agent, please let us know your "
+    "issue/inquiry, and provide clear screenshots if an error has occurred.\n\n"
+    "If you are a customer, please try to get assistance from other "
+    "customers before opening a ticket.\n\n"
+    "**NO STAFF WILL REQUEST THE TRANSFER OF A TICKET TO DMS FOR "
+    "PAYMENTS. CONTACT MANAGEMENT IF THIS HAPPENS!**"
+)
+
 # ------------------------------------------------------------
 # Dropdown categories — edit this list to whatever you need.
 # key: internal id (used in channel names/topics, don't change once live)
@@ -375,18 +390,23 @@ async def create_ticket_channel(interaction: discord.Interaction, cat_key: str, 
     await interaction.followup.send(f"✅ Ticket created: {channel.mention}", ephemeral=True)
 
     embed = discord.Embed(
-        title=f"{cat['emoji']} {cat['label']} — Ticket #{num:04d}",
-        description=f"Welcome, {interaction.user.mention}! 👋\n\nOur team will be with you shortly.",
+        description=TICKET_WELCOME_TEXT,
         color=BRAND_COLOR,
         timestamp=now,
     )
-    embed.add_field(name="📝 Reason", value=reason or "—", inline=False)
-    embed.add_field(name="🧾 Order ID", value=order_id or "—", inline=True)
-    embed.add_field(name="📦 Product", value=product or "—", inline=True)
-    set_logo(embed)
+    embed.set_author(
+        name="Support Ticket",
+        icon_url=BRAND_LOGO if BRAND_LOGO.startswith("https://") else discord.utils.MISSING,
+    )
+    embed.add_field(name="What is the reason for your request?", value=f"> {reason}" if reason else "> —", inline=False)
+    embed.add_field(name="What is your order ID?", value=f"> {order_id}" if order_id else "> —", inline=False)
+    embed.add_field(name="What product do you need help with?", value=f"> {product}" if product else "> —", inline=False)
     if TICKET_OPEN_IMAGE_URL:
         embed.set_image(url=TICKET_OPEN_IMAGE_URL)
-    embed.set_footer(text=f"{BRAND_NAME} • Ticket System")
+    embed.set_footer(
+        text=f"Support Ticket - {BRAND_NAME}",
+        icon_url=BRAND_LOGO if BRAND_LOGO.startswith("https://") else discord.utils.MISSING,
+    )
     await channel.send(content=None, embed=embed, view=TicketControlView())
 
 
