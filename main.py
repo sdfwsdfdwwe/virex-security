@@ -40,6 +40,9 @@ BRAND_COLOR            = int(os.getenv("BRAND_COLOR", "1A6FFF"), 16)
 # upload the image in any Discord channel, right-click it -> "Copy Link".
 PANEL_IMAGE_URL        = os.getenv("PANEL_IMAGE_URL", "").strip()
 
+# Banner image shown inside the welcome embed when a NEW ticket channel opens.
+TICKET_OPEN_IMAGE_URL  = os.getenv("TICKET_OPEN_IMAGE_URL", "").strip()
+
 # ------------------------------------------------------------
 # Dropdown categories — edit this list to whatever you need.
 # key: internal id (used in channel names/topics, don't change once live)
@@ -269,77 +272,122 @@ class TicketSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         cat_key = self.values[0]
-        cat = TICKET_CATEGORIES[cat_key]
         guild = interaction.guild
 
-        # Defer immediately — channel creation can take >3s and would
-        # otherwise trigger a failed-interaction error on Discord's side.
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
+        # A modal must be the FIRST response to an interaction, so we can't
+        # defer() here — check for an existing open ticket first (fast) and
+        # only then show the modal.
         for ch in guild.text_channels:
             if ch.topic and f"uid-{interaction.user.id}" in ch.topic:
-                await interaction.followup.send(f"❌ You already have an open ticket: {ch.mention}", ephemeral=True)
+                await interaction.response.send_message(f"❌ You already have an open ticket: {ch.mention}", ephemeral=True)
                 return
 
-        staff_role = guild.get_role(STAFF_ROLE_ID)
-        if staff_role is None:
-            await interaction.followup.send(
-                "⚠️ No support role configured (STAFF_ROLE_ID is missing/invalid). Ask an admin to fix the .env file.",
-                ephemeral=True,
-            )
-            return
+        await interaction.response.send_modal(TicketQuestionsModal(cat_key))
 
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True,
-                                                           attach_files=True, read_message_history=True),
-            staff_role: discord.PermissionOverwrite(view_channel=True, send_messages=True,
-                                                     attach_files=True, read_message_history=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True,
-                                                   manage_channels=True, read_message_history=True),
-        }
 
-        parent_category = get_category_parent(guild, cat_key)
-        config["ticket_counter"] = config.get("ticket_counter", 0) + 1
-        num = config["ticket_counter"]
+class TicketQuestionsModal(discord.ui.Modal):
+    def __init__(self, cat_key: str):
+        cat = TICKET_CATEGORIES[cat_key]
+        super().__init__(title=f"Open Ticket — {cat['label']}"[:45])
+        self.cat_key = cat_key
 
-        channel_name = f"{slugify(cat_key)}-{slugify(interaction.user.name)}"
-
-        try:
-            channel = await guild.create_text_channel(
-                name=channel_name,
-                overwrites=overwrites,
-                category=parent_category,
-                topic=f"uid-{interaction.user.id} | {cat_key} | open",
-            )
-        except discord.HTTPException as e:
-            await interaction.followup.send(f"❌ Could not create ticket: {e}", ephemeral=True)
-            return
-
-        now = datetime.now(timezone.utc)
-        config["tickets"][str(channel.id)] = {
-            "user_id": interaction.user.id,
-            "category": cat_key,
-            "created_at": now.isoformat(),
-            "last_activity": now.isoformat(),
-            "warned": False,
-        }
-        save_config(config)
-
-        await interaction.followup.send(f"✅ Ticket created: {channel.mention}", ephemeral=True)
-
-        embed = discord.Embed(
-            title=f"{cat['emoji']} {cat['label']} — Ticket #{num:04d}",
-            description=(
-                f"Welcome, {interaction.user.mention}! 👋\n\n"
-                f"Please describe your issue and **{staff_role.name}** will be with you shortly."
-            ),
-            color=BRAND_COLOR,
-            timestamp=now,
+        self.reason = discord.ui.TextInput(
+            label="What is the reason for your request?",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=500,
         )
-        set_logo(embed)
-        embed.set_footer(text=f"{BRAND_NAME} • Ticket System")
-        await channel.send(content=None, embed=embed, view=TicketControlView())
+        self.order_id = discord.ui.TextInput(
+            label="What is your order ID?",
+            required=False,
+            max_length=100,
+        )
+        self.product = discord.ui.TextInput(
+            label="What product do you need help with?",
+            required=False,
+            max_length=200,
+        )
+        self.add_item(self.reason)
+        self.add_item(self.order_id)
+        self.add_item(self.product)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Now safe to defer — channel creation can take >3s.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await create_ticket_channel(
+            interaction,
+            cat_key=self.cat_key,
+            reason=self.reason.value.strip(),
+            order_id=self.order_id.value.strip(),
+            product=self.product.value.strip(),
+        )
+
+
+async def create_ticket_channel(interaction: discord.Interaction, cat_key: str, reason: str, order_id: str, product: str):
+    guild = interaction.guild
+    cat = TICKET_CATEGORIES[cat_key]
+
+    staff_role = guild.get_role(STAFF_ROLE_ID)
+    if staff_role is None:
+        await interaction.followup.send(
+            "⚠️ No support role configured (STAFF_ROLE_ID is missing/invalid). Ask an admin to fix the Railway variables.",
+            ephemeral=True,
+        )
+        return
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                       attach_files=True, read_message_history=True),
+        staff_role: discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                 attach_files=True, read_message_history=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                               manage_channels=True, read_message_history=True),
+    }
+
+    parent_category = get_category_parent(guild, cat_key)
+    config["ticket_counter"] = config.get("ticket_counter", 0) + 1
+    num = config["ticket_counter"]
+
+    channel_name = f"{slugify(cat_key)}-{slugify(interaction.user.name)}"
+
+    try:
+        channel = await guild.create_text_channel(
+            name=channel_name,
+            overwrites=overwrites,
+            category=parent_category,
+            topic=f"uid-{interaction.user.id} | {cat_key} | open",
+        )
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"❌ Could not create ticket: {e}", ephemeral=True)
+        return
+
+    now = datetime.now(timezone.utc)
+    config["tickets"][str(channel.id)] = {
+        "user_id": interaction.user.id,
+        "category": cat_key,
+        "created_at": now.isoformat(),
+        "last_activity": now.isoformat(),
+        "warned": False,
+    }
+    save_config(config)
+
+    await interaction.followup.send(f"✅ Ticket created: {channel.mention}", ephemeral=True)
+
+    embed = discord.Embed(
+        title=f"{cat['emoji']} {cat['label']} — Ticket #{num:04d}",
+        description=f"Welcome, {interaction.user.mention}! 👋\n\nOur team will be with you shortly.",
+        color=BRAND_COLOR,
+        timestamp=now,
+    )
+    embed.add_field(name="📝 Reason", value=reason or "—", inline=False)
+    embed.add_field(name="🧾 Order ID", value=order_id or "—", inline=True)
+    embed.add_field(name="📦 Product", value=product or "—", inline=True)
+    set_logo(embed)
+    if TICKET_OPEN_IMAGE_URL:
+        embed.set_image(url=TICKET_OPEN_IMAGE_URL)
+    embed.set_footer(text=f"{BRAND_NAME} • Ticket System")
+    await channel.send(content=None, embed=embed, view=TicketControlView())
 
 
 class TicketPanelView(discord.ui.View):
