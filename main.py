@@ -56,6 +56,7 @@ SPAM_TIME_WINDOW       = int(os.getenv("SPAM_TIME_WINDOW", 5))       # ...within
 SPAM_TIMEOUT_DURATION  = int(os.getenv("SPAM_TIMEOUT_DURATION", 60)) # timeout length (seconds) for spam
 LINK_TIMEOUT_DURATION  = int(os.getenv("LINK_TIMEOUT_DURATION", 60)) # timeout length (seconds) for posting links
 CHAT_BLACKLIST_ROLE_ID = int(os.getenv("CHAT_BLACKLIST_ROLE_ID", 0)) # role auto-assigned to invite-link violators
+MOD_FILTER_CHANNEL_ID  = int(os.getenv("MOD_FILTER_CHANNEL_ID", 0))  # if set, link/spam filter ONLY applies in this channel
 
 URL_REGEX = re.compile(r"https?://\S+|discord\.gg/\S+", re.IGNORECASE)
 
@@ -584,9 +585,12 @@ async def on_message(message: discord.Message):
 
     # ------------------------------------------------------------
     # Moderation add-on: link filter + spam protection
-    # (skipped for admins / whitelisted roles)
+    # (skipped for admins / whitelisted roles, and only runs in the
+    # channel configured via MOD_FILTER_CHANNEL_ID, if one is set)
     # ------------------------------------------------------------
-    if isinstance(message.author, discord.Member) and not is_mod_whitelisted(message.author):
+    filter_applies_here = (not MOD_FILTER_CHANNEL_ID) or (message.channel.id == MOD_FILTER_CHANNEL_ID)
+
+    if filter_applies_here and isinstance(message.author, discord.Member) and not is_mod_whitelisted(message.author):
         # Link filter
         if URL_REGEX.search(message.content or ""):
             try:
@@ -876,6 +880,12 @@ async def status(ctx: commands.Context):
     embed.add_field(
         name="Log Channel",
         value=channel.mention if channel else "Not set (use `!setlog <channel_id>`)",
+        inline=False,
+    )
+    filter_channel = ctx.guild.get_channel(MOD_FILTER_CHANNEL_ID) if MOD_FILTER_CHANNEL_ID else None
+    embed.add_field(
+        name="Filter Active In",
+        value=filter_channel.mention if filter_channel else "All channels (MOD_FILTER_CHANNEL_ID not set)",
         inline=False,
     )
     embed.add_field(
