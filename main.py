@@ -105,6 +105,43 @@ def get_category_parent(guild: discord.Guild, cat_key: str):
     channel = guild.get_channel(int(chosen_id))
     return channel if isinstance(channel, discord.CategoryChannel) else None
 
+
+def get_all_ticket_category_ids() -> set:
+    """All Discord category IDs configured anywhere as a ticket parent
+    (the shared default plus every category_env override)."""
+    ids = set()
+    if TICKET_CATEGORY_ID:
+        ids.add(TICKET_CATEGORY_ID)
+    for cat_info in TICKET_CATEGORIES.values():
+        env_name = cat_info.get("category_env")
+        val = os.getenv(env_name, "").strip() if env_name else ""
+        if val.isdigit():
+            ids.add(int(val))
+    return ids
+
+
+def is_ticket_category_channel(channel: discord.abc.GuildChannel) -> bool:
+    """True if this channel sits under one of the configured ticket categories,
+    even if it isn't (or is no longer) tracked in tickets.json."""
+    category = getattr(channel, "category", None)
+    if category is None:
+        return False
+    return category.id in get_all_ticket_category_ids()
+
+
+def guess_ticket_category_key(channel: discord.abc.GuildChannel) -> str:
+    """Best-effort guess of which ticket category (support/purchase/other) a
+    channel belongs to, based on its Discord parent category. Falls back to
+    'support' if it can't be determined (e.g. everything shares one category)."""
+    category = getattr(channel, "category", None)
+    if category is not None:
+        for key, cat_info in TICKET_CATEGORIES.items():
+            env_name = cat_info.get("category_env")
+            val = os.getenv(env_name, "").strip() if env_name else ""
+            if val.isdigit() and int(val) == category.id:
+                return key
+    return "support"
+
 CONFIG_FILE = "tickets.json"
 
 # ============================================================
@@ -287,11 +324,14 @@ def generate_transcript(channel, messages, guild, category_key: str) -> str:
 async def close_ticket(channel: discord.TextChannel, guild: discord.Guild, closed_by=None):
     info = config["tickets"].get(str(channel.id))
     if not info:
-        try:
-            await channel.delete()
-        except discord.HTTPException:
-            pass
-        return
+        # Not tracked anymore (e.g. tickets.json was reset by a restart), but
+        # this channel still lives under a configured ticket category — build
+        # a best-effort transcript instead of silently deleting it.
+        info = {
+            "user_id": None,
+            "category": guess_ticket_category_key(channel),
+            "created_at": channel.created_at.isoformat() if channel.created_at else datetime.now(timezone.utc).isoformat(),
+        }
 
     messages = [m async for m in channel.history(limit=1000, oldest_first=True)]
     html_doc = generate_transcript(channel, messages, guild, info.get("category", "support"))
@@ -299,8 +339,8 @@ async def close_ticket(channel: discord.TextChannel, guild: discord.Guild, close
     log_channel = guild.get_channel(TRANSCRIPT_CHANNEL_ID)
     if log_channel is not None:
         cat = TICKET_CATEGORIES.get(info.get("category", "support"), {"label": "Support", "emoji": "🎫"})
-        user = guild.get_member(info["user_id"])
-        user_str = user.mention if user else f"<@{info['user_id']}>"
+        user = guild.get_member(info["user_id"]) if info.get("user_id") else None
+        user_str = user.mention if user else (f"<@{info['user_id']}>" if info.get("user_id") else "Unknown (untracked ticket)")
         opened_ts = int(datetime.fromisoformat(info["created_at"]).timestamp())
         closed_str = closed_by.mention if closed_by and hasattr(closed_by, "mention") else "Auto-Close ⏰"
 
@@ -514,9 +554,15 @@ class TicketControlView(discord.ui.View):
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         info = config["tickets"].get(str(interaction.channel.id))
         if not info:
-            await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
-            return
-        if not is_staff(interaction.user) and info["user_id"] != interaction.user.id:
+            if not is_ticket_category_channel(interaction.channel):
+                await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
+                return
+            # Untracked (e.g. after a restart), but this is clearly a ticket
+            # channel — only staff can close it since we can't verify the owner.
+            if not is_staff(interaction.user):
+                await interaction.response.send_message("❌ Only staff can close this ticket.", ephemeral=True)
+                return
+        elif not is_staff(interaction.user) and info["user_id"] != interaction.user.id:
             await interaction.response.send_message("❌ Only staff or the ticket owner can close this.", ephemeral=True)
             return
         await interaction.response.send_message("🔒 Closing in 5 seconds...")
@@ -620,12 +666,14 @@ async def on_message(message: discord.Message):
             strike_count = bump_strike(message.author.id, "link")
 
             if strike_count < STRIKES_BEFORE_TIMEOUT:
-                # Just a warning — no timeout yet
+                # Just a warning — no timeout yet. Gets auto-deleted after 5s
+                # so it doesn't clutter the channel.
                 try:
-                    await message.channel.send(
+                    warn_msg = await message.channel.send(
                         f"⚠️ {message.author.mention} posting links/invites isn't allowed here. "
                         f"Warning **{strike_count}/{STRIKES_BEFORE_TIMEOUT}** — one more and you'll be timed out."
                     )
+                    await warn_msg.delete(delay=5)
                 except discord.HTTPException:
                     pass
                 embed = discord.Embed(
@@ -769,7 +817,7 @@ async def cmd_close(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Staff only.", ephemeral=True)
         return
     info = config["tickets"].get(str(interaction.channel.id))
-    if not info:
+    if not info and not is_ticket_category_channel(interaction.channel):
         await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
         return
     await interaction.response.send_message("🔒 Closing in 5 seconds...")
