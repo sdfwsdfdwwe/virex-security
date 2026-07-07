@@ -411,19 +411,19 @@ async def create_ticket_channel(interaction: discord.Interaction, cat_key: str, 
         color=BRAND_COLOR,
         timestamp=now,
     )
-    embed.set_author(
-        name="Support Ticket",
-        icon_url=BRAND_LOGO if BRAND_LOGO.startswith("https://") else discord.utils.MISSING,
-    )
+    if BRAND_LOGO.startswith("https://"):
+        embed.set_author(name="Support Ticket", icon_url=BRAND_LOGO)
+    else:
+        embed.set_author(name="Support Ticket")
     embed.add_field(name="What is the reason for your request?", value=f"> {reason}" if reason else "> —", inline=False)
     embed.add_field(name="What is your order ID?", value=f"> {order_id}" if order_id else "> —", inline=False)
     embed.add_field(name="What product do you need help with?", value=f"> {product}" if product else "> —", inline=False)
     if TICKET_OPEN_IMAGE_URL:
         embed.set_image(url=TICKET_OPEN_IMAGE_URL)
-    embed.set_footer(
-        text=f"Support Ticket - {BRAND_NAME}",
-        icon_url=BRAND_LOGO if BRAND_LOGO.startswith("https://") else discord.utils.MISSING,
-    )
+    if BRAND_LOGO.startswith("https://"):
+        embed.set_footer(text=f"Support Ticket - {BRAND_NAME}", icon_url=BRAND_LOGO)
+    else:
+        embed.set_footer(text=f"Support Ticket - {BRAND_NAME}")
     await channel.send(content=None, embed=embed, view=TicketControlView())
 
 
