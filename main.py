@@ -44,6 +44,10 @@ PANEL_IMAGE_URL        = os.getenv("PANEL_IMAGE_URL", "").strip()
 # Banner image shown inside the welcome embed when a NEW ticket channel opens.
 TICKET_OPEN_IMAGE_URL  = os.getenv("TICKET_OPEN_IMAGE_URL", "").strip()
 
+# /guide command — posts a link (e.g. a tutorial) in an embed.
+GUIDE_TITLE            = os.getenv("GUIDE_TITLE", "General Tutorial")
+GUIDE_URL              = os.getenv("GUIDE_URL", "").strip()
+
 # ------------------------------------------------------------
 # Moderation add-on settings (whitelist roles, spam protection, link filter)
 # ------------------------------------------------------------
@@ -726,6 +730,34 @@ async def cmd_remove(interaction: discord.Interaction, user: discord.Member):
         return
     await interaction.channel.set_permissions(user, overwrite=None)
     await interaction.response.send_message(embed=discord.Embed(description=f"✅ {user.mention} removed.", color=BRAND_COLOR))
+
+
+@bot.tree.command(name="guide", description="Show the general tutorial link")
+@app_commands.guild_only()
+async def cmd_guide(interaction: discord.Interaction):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+
+    if not GUIDE_URL:
+        await interaction.response.send_message(
+            "⚠️ No guide URL configured (set GUIDE_URL in the Railway variables).",
+            ephemeral=True,
+        )
+        return
+
+    embed = discord.Embed(
+        title=GUIDE_TITLE,
+        description=GUIDE_URL,
+        color=BRAND_COLOR,
+        timestamp=datetime.now(timezone.utc),
+    )
+    if BRAND_LOGO.startswith("https://"):
+        embed.set_footer(text=f"Ticket Support - {BRAND_NAME}", icon_url=BRAND_LOGO)
+    else:
+        embed.set_footer(text=f"Ticket Support - {BRAND_NAME}")
+
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="tstatus", description="Show current ticket bot configuration")
