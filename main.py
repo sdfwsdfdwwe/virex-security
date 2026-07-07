@@ -157,6 +157,7 @@ def load_config():
     data.setdefault("ticket_counter", 0)
     data.setdefault("log_channel_id", None)      # moderation log channel
     data.setdefault("whitelist_role_ids", [])    # roles exempt from spam/link filter
+    data.setdefault("whitelist_user_ids", [])    # individual users exempt from spam/link filter
     data.setdefault("mod_strikes", {})           # user_id(str) -> {"link": int, "spam": int}
     return data
 
@@ -196,8 +197,10 @@ def is_mod_whitelisted(member: discord.Member) -> bool:
     """Members exempt from spam protection / link filtering."""
     if member.guild_permissions.administrator:
         return True
-    whitelisted_ids = config.get("whitelist_role_ids", [])
-    return any(r.id in whitelisted_ids for r in member.roles)
+    if member.id in config.get("whitelist_user_ids", []):
+        return True
+    whitelisted_role_ids = config.get("whitelist_role_ids", [])
+    return any(r.id in whitelisted_role_ids for r in member.roles)
 
 
 async def send_log(guild: discord.Guild, embed: discord.Embed):
@@ -981,6 +984,47 @@ async def whitelistroles_error(ctx, error):
         await ctx.send("Usage: `!whitelistroles <role_id>`")
 
 
+@bot.command(name="whitelistuser")
+@commands.has_permissions(manage_guild=True)
+async def whitelistuser(ctx: commands.Context, user_id: str = None):
+    """Toggle a specific user in/out of the moderation whitelist (exempt from spam/link filter)."""
+    if user_id is None:
+        await ctx.send("Usage: `!whitelistuser <user_id>`")
+        return
+    try:
+        user_id_int = int(user_id)
+    except ValueError:
+        await ctx.send("Please provide a valid user ID (numbers only).")
+        return
+    member = ctx.guild.get_member(user_id_int)
+    user_str = member.mention if member else f"<@{user_id_int}>"
+
+    whitelisted_ids = config.setdefault("whitelist_user_ids", [])
+    if user_id_int in whitelisted_ids:
+        whitelisted_ids.remove(user_id_int)
+        save_config(config)
+        await ctx.send(f"➖ {user_str} removed from the moderation whitelist.")
+    else:
+        whitelisted_ids.append(user_id_int)
+        save_config(config)
+        await ctx.send(f"✅ {user_str} added to the moderation whitelist.")
+    embed = discord.Embed(
+        title="🛡️ Whitelist Updated",
+        description=f"User: {user_str}\nStatus: {'Whitelisted' if user_id_int in whitelisted_ids else 'Removed from whitelist'}",
+        color=discord.Color.blue(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    await send_log(ctx.guild, embed)
+
+
+@whitelistuser.error
+async def whitelistuser_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("You need `Manage Server` permission to use this command.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Usage: `!whitelistuser <user_id>`")
+
+
 @bot.command(name="status")
 async def status(ctx: commands.Context):
     """Show current moderation add-on configuration."""
@@ -993,6 +1037,9 @@ async def status(ctx: commands.Context):
         if role:
             role_mentions.append(role.mention)
     roles_text = ", ".join(role_mentions) if role_mentions else "None set (use `!whitelistroles <role_id>`)"
+    whitelisted_user_ids = config.get("whitelist_user_ids", [])
+    user_mentions = [f"<@{uid}>" for uid in whitelisted_user_ids]
+    users_text = ", ".join(user_mentions) if user_mentions else "None set (use `!whitelistuser <user_id>`)"
     embed = discord.Embed(title="🤖 Bot Status", color=discord.Color.blurple())
     embed.add_field(
         name="Log Channel",
@@ -1023,6 +1070,7 @@ async def status(ctx: commands.Context):
         inline=False,
     )
     embed.add_field(name="Whitelisted Roles", value=roles_text, inline=False)
+    embed.add_field(name="Whitelisted Users", value=users_text, inline=False)
     await ctx.send(embed=embed)
 
 
