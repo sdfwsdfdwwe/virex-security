@@ -57,6 +57,7 @@ SPAM_TIMEOUT_DURATION  = int(os.getenv("SPAM_TIMEOUT_DURATION", 60)) # timeout l
 LINK_TIMEOUT_DURATION  = int(os.getenv("LINK_TIMEOUT_DURATION", 60)) # timeout length (seconds) for posting links
 CHAT_BLACKLIST_ROLE_ID = int(os.getenv("CHAT_BLACKLIST_ROLE_ID", 0)) # role auto-assigned to invite-link violators
 MOD_FILTER_CHANNEL_ID  = int(os.getenv("MOD_FILTER_CHANNEL_ID", 0))  # if set, link/spam filter ONLY applies in this channel
+STRIKES_BEFORE_TIMEOUT = int(os.getenv("STRIKES_BEFORE_TIMEOUT", 3)) # warnings allowed before a timeout is applied
 
 URL_REGEX = re.compile(r"https?://\S+|discord\.gg/\S+", re.IGNORECASE)
 
@@ -119,6 +120,7 @@ def load_config():
     data.setdefault("ticket_counter", 0)
     data.setdefault("log_channel_id", None)      # moderation log channel
     data.setdefault("whitelist_role_ids", [])    # roles exempt from spam/link filter
+    data.setdefault("mod_strikes", {})           # user_id(str) -> {"link": int, "spam": int}
     return data
 
 
@@ -173,6 +175,23 @@ async def send_log(guild: discord.Guild, embed: discord.Embed):
         await channel.send(embed=embed)
     except discord.Forbidden:
         print("Missing permissions to send in the moderation log channel.")
+
+
+def bump_strike(user_id: int, kind: str) -> int:
+    """Increment and persist a user's warning count for a given violation kind
+    ('link' or 'spam'). Returns the new count."""
+    strikes = config.setdefault("mod_strikes", {})
+    user_strikes = strikes.setdefault(str(user_id), {"link": 0, "spam": 0})
+    user_strikes[kind] = user_strikes.get(kind, 0) + 1
+    save_config(config)
+    return user_strikes[kind]
+
+
+def reset_strike(user_id: int, kind: str):
+    strikes = config.setdefault("mod_strikes", {})
+    user_strikes = strikes.setdefault(str(user_id), {"link": 0, "spam": 0})
+    user_strikes[kind] = 0
+    save_config(config)
 
 
 def slugify(text: str) -> str:
@@ -597,9 +616,35 @@ async def on_message(message: discord.Message):
                 await message.delete()
             except (discord.Forbidden, discord.NotFound):
                 pass
+
+            strike_count = bump_strike(message.author.id, "link")
+
+            if strike_count < STRIKES_BEFORE_TIMEOUT:
+                # Just a warning — no timeout yet
+                try:
+                    await message.channel.send(
+                        f"⚠️ {message.author.mention} posting links/invites isn't allowed here. "
+                        f"Warning **{strike_count}/{STRIKES_BEFORE_TIMEOUT}** — one more and you'll be timed out."
+                    )
+                except discord.HTTPException:
+                    pass
+                embed = discord.Embed(
+                    title="⚠️ Link Warning",
+                    description=(
+                        f"{message.author.mention} posted a link in {message.channel.mention} "
+                        f"(warning {strike_count}/{STRIKES_BEFORE_TIMEOUT})."
+                    ),
+                    color=discord.Color.gold(),
+                    timestamp=datetime.now(timezone.utc),
+                )
+                await send_log(message.guild, embed)
+                return
+
+            # Threshold reached — reset the counter and actually punish
+            reset_strike(message.author.id, "link")
             try:
                 await message.author.timeout(
-                    timedelta(seconds=LINK_TIMEOUT_DURATION), reason="Posted a link"
+                    timedelta(seconds=LINK_TIMEOUT_DURATION), reason="Repeated invite links"
                 )
             except discord.Forbidden:
                 pass
@@ -619,8 +664,8 @@ async def on_message(message: discord.Message):
             embed = discord.Embed(
                 title="🔗 Link Filter",
                 description=(
-                    f"Deleted a message from {message.author.mention} in {message.channel.mention} "
-                    f"for containing a link, applied a {LINK_TIMEOUT_DURATION}s timeout{blacklist_note}."
+                    f"{message.author.mention} reached {STRIKES_BEFORE_TIMEOUT} link warnings in "
+                    f"{message.channel.mention} — applied a {LINK_TIMEOUT_DURATION}s timeout{blacklist_note}."
                 ),
                 color=discord.Color.orange(),
                 timestamp=datetime.now(timezone.utc),
@@ -637,22 +682,46 @@ async def on_message(message: discord.Message):
 
         if len(recent) > SPAM_MESSAGE_LIMIT:
             user_message_times[message.author.id] = []  # reset so we don't re-trigger every message
-            try:
-                await message.author.timeout(
-                    timedelta(seconds=SPAM_TIMEOUT_DURATION), reason="Spamming"
+
+            strike_count = bump_strike(message.author.id, "spam")
+
+            if strike_count < STRIKES_BEFORE_TIMEOUT:
+                try:
+                    await message.channel.send(
+                        f"⚠️ {message.author.mention} please slow down. "
+                        f"Warning **{strike_count}/{STRIKES_BEFORE_TIMEOUT}** — one more and you'll be timed out."
+                    )
+                except discord.HTTPException:
+                    pass
+                embed = discord.Embed(
+                    title="⚠️ Spam Warning",
+                    description=(
+                        f"{message.author.mention} sent more than {SPAM_MESSAGE_LIMIT} messages in "
+                        f"{SPAM_TIME_WINDOW}s in {message.channel.mention} "
+                        f"(warning {strike_count}/{STRIKES_BEFORE_TIMEOUT})."
+                    ),
+                    color=discord.Color.gold(),
+                    timestamp=datetime.now(timezone.utc),
                 )
-            except discord.Forbidden:
-                pass
-            embed = discord.Embed(
-                title="🚫 Spam Protection",
-                description=(
-                    f"Timed out {message.author.mention} for {SPAM_TIMEOUT_DURATION}s "
-                    f"(sent more than {SPAM_MESSAGE_LIMIT} messages in {SPAM_TIME_WINDOW}s in {message.channel.mention})."
-                ),
-                color=discord.Color.red(),
-                timestamp=datetime.now(timezone.utc),
-            )
-            await send_log(message.guild, embed)
+                await send_log(message.guild, embed)
+            else:
+                reset_strike(message.author.id, "spam")
+                try:
+                    await message.author.timeout(
+                        timedelta(seconds=SPAM_TIMEOUT_DURATION), reason="Repeated spamming"
+                    )
+                except discord.Forbidden:
+                    pass
+                embed = discord.Embed(
+                    title="🚫 Spam Protection",
+                    description=(
+                        f"{message.author.mention} reached {STRIKES_BEFORE_TIMEOUT} spam warnings in "
+                        f"{message.channel.mention} — timed out for {SPAM_TIMEOUT_DURATION}s."
+                    ),
+                    color=discord.Color.red(),
+                    timestamp=datetime.now(timezone.utc),
+                )
+                await send_log(message.guild, embed)
 
     # ------------------------------------------------------------
     # Ticket activity tracking
@@ -890,15 +959,18 @@ async def status(ctx: commands.Context):
     )
     embed.add_field(
         name="Spam Protection",
-        value=f"More than {SPAM_MESSAGE_LIMIT} messages in {SPAM_TIME_WINDOW}s → {SPAM_TIMEOUT_DURATION}s timeout",
+        value=(
+            f"More than {SPAM_MESSAGE_LIMIT} messages in {SPAM_TIME_WINDOW}s → warning "
+            f"(timeout {SPAM_TIMEOUT_DURATION}s after {STRIKES_BEFORE_TIMEOUT} warnings)"
+        ),
         inline=False,
     )
     blacklist_role = ctx.guild.get_role(CHAT_BLACKLIST_ROLE_ID) if CHAT_BLACKLIST_ROLE_ID else None
     embed.add_field(
         name="Link Filter",
         value=(
-            f"Enabled (message deleted + {LINK_TIMEOUT_DURATION}s timeout"
-            f"{f' + {blacklist_role.mention} role' if blacklist_role else ''})"
+            f"Warning after each link, timeout ({LINK_TIMEOUT_DURATION}s) after {STRIKES_BEFORE_TIMEOUT} warnings"
+            f"{f' + {blacklist_role.mention} role' if blacklist_role else ''}"
         ),
         inline=False,
     )
