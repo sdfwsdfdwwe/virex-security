@@ -51,6 +51,7 @@ SPAM_MESSAGE_LIMIT     = int(os.getenv("SPAM_MESSAGE_LIMIT", 5))     # max messa
 SPAM_TIME_WINDOW       = int(os.getenv("SPAM_TIME_WINDOW", 5))       # ...within this many seconds
 SPAM_TIMEOUT_DURATION  = int(os.getenv("SPAM_TIMEOUT_DURATION", 60)) # timeout length (seconds) for spam
 LINK_TIMEOUT_DURATION  = int(os.getenv("LINK_TIMEOUT_DURATION", 60)) # timeout length (seconds) for posting links
+CHAT_BLACKLIST_ROLE_ID = int(os.getenv("CHAT_BLACKLIST_ROLE_ID", 0)) # role auto-assigned to invite-link violators
 
 URL_REGEX = re.compile(r"https?://\S+|discord\.gg/\S+", re.IGNORECASE)
 
@@ -594,11 +595,24 @@ async def on_message(message: discord.Message):
                 )
             except discord.Forbidden:
                 pass
+
+            blacklist_note = ""
+            if CHAT_BLACKLIST_ROLE_ID:
+                blacklist_role = message.guild.get_role(CHAT_BLACKLIST_ROLE_ID)
+                if blacklist_role is not None:
+                    try:
+                        await message.author.add_roles(blacklist_role, reason="Posted an invite link")
+                        blacklist_note = f", and gave them {blacklist_role.mention}"
+                    except discord.Forbidden:
+                        print("Missing permissions to assign the chat blacklist role.")
+                else:
+                    print("CHAT_BLACKLIST_ROLE_ID is set but no such role was found in this server.")
+
             embed = discord.Embed(
                 title="🔗 Link Filter",
                 description=(
                     f"Deleted a message from {message.author.mention} in {message.channel.mention} "
-                    f"for containing a link, and applied a {LINK_TIMEOUT_DURATION}s timeout."
+                    f"for containing a link, applied a {LINK_TIMEOUT_DURATION}s timeout{blacklist_note}."
                 ),
                 color=discord.Color.orange(),
                 timestamp=datetime.now(timezone.utc),
@@ -837,9 +851,13 @@ async def status(ctx: commands.Context):
         value=f"More than {SPAM_MESSAGE_LIMIT} messages in {SPAM_TIME_WINDOW}s → {SPAM_TIMEOUT_DURATION}s timeout",
         inline=False,
     )
+    blacklist_role = ctx.guild.get_role(CHAT_BLACKLIST_ROLE_ID) if CHAT_BLACKLIST_ROLE_ID else None
     embed.add_field(
         name="Link Filter",
-        value=f"Enabled (message deleted + {LINK_TIMEOUT_DURATION}s timeout)",
+        value=(
+            f"Enabled (message deleted + {LINK_TIMEOUT_DURATION}s timeout"
+            f"{f' + {blacklist_role.mention} role' if blacklist_role else ''})"
+        ),
         inline=False,
     )
     embed.add_field(name="Whitelisted Roles", value=roles_text, inline=False)
