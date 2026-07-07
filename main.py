@@ -18,9 +18,6 @@ import re
 import io
 import html as html_lib
 from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # ============================================================
 #  CONFIG — set these in your .env file
