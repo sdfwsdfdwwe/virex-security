@@ -332,14 +332,14 @@ class TicketSelect(discord.ui.Select):
             title=f"{cat['emoji']} {cat['label']} — Ticket #{num:04d}",
             description=(
                 f"Welcome, {interaction.user.mention}! 👋\n\n"
-                f"Please describe your issue and {staff_role.mention} will be with you shortly."
+                f"Please describe your issue and **{staff_role.name}** will be with you shortly."
             ),
             color=BRAND_COLOR,
             timestamp=now,
         )
         set_logo(embed)
         embed.set_footer(text=f"{BRAND_NAME} • Ticket System")
-        await channel.send(content=f"{interaction.user.mention} {staff_role.mention}", embed=embed, view=TicketControlView())
+        await channel.send(content=None, embed=embed, view=TicketControlView())
 
 
 class TicketPanelView(discord.ui.View):
@@ -364,15 +364,6 @@ class TicketControlView(discord.ui.View):
         await interaction.response.send_message("🔒 Closing in 5 seconds...")
         await asyncio.sleep(5)
         await close_ticket(interaction.channel, interaction.guild, closed_by=interaction.user)
-
-    @discord.ui.button(label="Claim Ticket", style=discord.ButtonStyle.success, emoji="✋", custom_id="ticket_claim_button")
-    async def claim_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_staff(interaction.user):
-            await interaction.response.send_message("❌ Only staff can claim tickets.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            embed=discord.Embed(description=f"✋ **{interaction.user.mention}** has claimed this ticket!", color=BRAND_COLOR)
-        )
 
 
 # ============================================================
