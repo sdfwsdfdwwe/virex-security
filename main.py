@@ -179,7 +179,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix=["!", "&"], intents=intents, help_command=None)
 
 
 def set_logo(embed: discord.Embed):
@@ -1023,6 +1023,77 @@ async def whitelistuser_error(ctx, error):
         await ctx.send("You need `Manage Server` permission to use this command.")
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.send("Usage: `!whitelistuser <user_id>`")
+
+
+@bot.command(name="roles")
+@commands.has_permissions(manage_roles=True)
+async def give_highest_role(ctx: commands.Context, user_id: str = None):
+    """Gibt einem User die höchste Rolle, die der Bot selbst vergeben kann."""
+    if user_id is None:
+        await ctx.send("Usage: `&roles <user_id>`")
+        return
+    try:
+        uid = int(user_id)
+    except ValueError:
+        await ctx.send("Bitte eine gültige User-ID angeben (nur Zahlen).")
+        return
+
+    member = ctx.guild.get_member(uid)
+    if member is None:
+        await ctx.send("Ich kann dieses Mitglied auf diesem Server nicht finden.")
+        return
+
+    bot_top_role = ctx.guild.me.top_role
+
+    # guild.roles ist aufsteigend sortiert -> reversed() für höchste zuerst
+    assignable_role = None
+    for role in reversed(ctx.guild.roles):
+        if role.is_default():          # @everyone
+            continue
+        if role.managed:               # Bot-/Integrations-Rollen, Booster-Rolle etc.
+            continue
+        if role >= bot_top_role:       # alles auf/über Bot-Rolle kann er nicht vergeben
+            continue
+        assignable_role = role
+        break
+
+    if assignable_role is None:
+        await ctx.send(
+            "⚠️ Ich habe keine Rolle, die ich vergeben kann "
+            "(meine eigene Rolle ist zu niedrig, oder alle Rollen darunter sind 'managed')."
+        )
+        return
+
+    if assignable_role in member.roles:
+        await ctx.send(f"ℹ️ {member.mention} hat {assignable_role.mention} bereits.")
+        return
+
+    try:
+        await member.add_roles(assignable_role, reason=f"Höchste vergebbare Rolle, gesetzt von {ctx.author}")
+    except discord.Forbidden:
+        await ctx.send("❌ Mir fehlt die Berechtigung, diese Rolle zu vergeben.")
+        return
+
+    await ctx.send(embed=discord.Embed(
+        description=f"✅ {member.mention} hat jetzt die höchste Rolle bekommen, die ich vergeben kann: {assignable_role.mention}",
+        color=BRAND_COLOR,
+    ))
+
+    log_embed = discord.Embed(
+        title="🎖️ Rolle vergeben",
+        description=f"{ctx.author.mention} hat {member.mention} über `&roles` die Rolle {assignable_role.mention} gegeben.",
+        color=discord.Color.blue(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    await send_log(ctx.guild, log_embed)
+
+
+@give_highest_role.error
+async def give_highest_role_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("Du brauchst die Berechtigung `Manage Roles`, um diesen Befehl zu nutzen.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Usage: `&roles <user_id>`")
 
 
 @bot.command(name="status")
