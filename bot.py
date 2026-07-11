@@ -5,6 +5,8 @@
 #   - Single support role (+ server admins) can see tickets
 #   - HTML transcript posted to a log channel on close
 #   - Auto-close after 24h of inactivity, with a warning 1h before
+#   - LINK FILTER: block links in chosen channels, whitelist support
+#     role + individual users, warn -> 2nd warning = timeout + blacklist role
 #  All IDs (guild, roles, channels) are set by YOU in the .env file.
 # ============================================================
 
@@ -26,7 +28,7 @@ TOKEN                  = os.getenv("DISCORD_TOKEN", "")
 GUILD_ID               = int(os.getenv("GUILD_ID", 0))
 TICKET_CATEGORY_ID     = int(os.getenv("TICKET_CATEGORY_ID", 0))   # Discord category new ticket channels go under
 TRANSCRIPT_CHANNEL_ID  = int(os.getenv("TRANSCRIPT_CHANNEL_ID", 0)) # log channel for transcripts
-STAFF_ROLE_ID          = int(os.getenv("STAFF_ROLE_ID", 0))         # the ONE role allowed to see tickets
+STAFF_ROLE_ID          = int(os.getenv("STAFF_ROLE_ID", 0))         # the ONE role allowed to see tickets (also link-whitelisted)
 
 AUTO_CLOSE_HOURS       = float(os.getenv("AUTO_CLOSE_HOURS", 24))   # close after this many hours of inactivity
 WARNING_HOURS_BEFORE   = float(os.getenv("WARNING_HOURS_BEFORE", 1)) # send warning this many hours before auto-close
@@ -43,6 +45,32 @@ PANEL_IMAGE_URL        = os.getenv("PANEL_IMAGE_URL", "").strip()
 # Banner image shown inside the welcome embed when a NEW ticket channel opens.
 TICKET_OPEN_IMAGE_URL  = os.getenv("TICKET_OPEN_IMAGE_URL", "").strip()
 
+# ------------------------------------------------------------
+#  LINK FILTER CONFIG — set these in your .env / Railway variables
+# ------------------------------------------------------------
+# Channel(s) where links are blocked. Comma-separated list of channel IDs,
+# e.g. "123456789,987654321". Leave empty to disable the filter.
+LINK_FILTER_CHANNEL_IDS = [
+    int(x) for x in os.getenv("LINK_FILTER_CHANNEL_IDS", "").replace(" ", "").split(",")
+    if x.strip().isdigit()
+]
+# The role that gets applied on the 2nd warning (you already created it).
+BLACKLIST_ROLE_ID      = int(os.getenv("BLACKLIST_ROLE_ID", 0))
+# Channel where all filter actions (warnings, punishments, whitelisting) are logged.
+MOD_LOG_CHANNEL_ID     = int(os.getenv("MOD_LOG_CHANNEL_ID", 0))
+# Minutes of timeout applied when the warning limit is reached.
+LINK_TIMEOUT_MINUTES   = float(os.getenv("LINK_TIMEOUT_MINUTES", 5))
+# How many warnings before punishment (2 = warn once, punish on the 2nd).
+LINK_WARN_LIMIT        = int(os.getenv("LINK_WARN_LIMIT", 2))
+
+# Matches full URLs, www., discord invites, and bare domains with common TLDs.
+LINK_REGEX = re.compile(
+    r"(https?://|www\.|discord(?:\.gg|app\.com/invite|\.com/invite)/|"
+    r"\b[a-z0-9-]+\.(?:com|net|org|gg|io|xyz|me|co|tv|ru|info|link|shop|store|app|dev|site|online|club|gg|to)\b)",
+    re.IGNORECASE,
+)
+
+# Banner image shown inside the welcome embed when a NEW ticket channel opens.
 # The main body text shown in every new ticket's welcome embed (edit freely).
 # {brand} gets replaced with BRAND_NAME automatically.
 TICKET_WELCOME_TEXT = (
@@ -60,12 +88,6 @@ TICKET_WELCOME_TEXT = (
 
 # ------------------------------------------------------------
 # Dropdown categories — edit this list to whatever you need.
-# key: internal id (used in channel names/topics, don't change once live)
-# label/description/emoji: shown in the dropdown
-# category_env: the Railway variable name that holds the Discord parent
-#               category ID this ticket type's channels get created under.
-#               If that variable is empty/unset, TICKET_CATEGORY_ID (the
-#               default fallback below) is used instead.
 # ------------------------------------------------------------
 TICKET_CATEGORIES = {
     "support":  {"label": "General Support", "description": "Get help from our staff.",       "emoji": "🎫", "category_env": "TICKET_CATEGORY_ID_SUPPORT"},
@@ -98,8 +120,10 @@ def load_config():
             data = json.load(f)
     else:
         data = {}
-    data.setdefault("tickets", {})       # channel_id(str) -> ticket info
+    data.setdefault("tickets", {})          # channel_id(str) -> ticket info
     data.setdefault("ticket_counter", 0)
+    data.setdefault("link_whitelist", [])   # list of user IDs (int) allowed to post links
+    data.setdefault("link_warnings", {})    # user_id(str) -> warning count (int)
     return data
 
 
@@ -117,7 +141,8 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+# Accept both "!" and "$" prefixes (you use $whitelistuser).
+bot = commands.Bot(command_prefix=["!", "$"], intents=intents, help_command=None)
 
 
 def set_logo(embed: discord.Embed):
@@ -131,10 +156,131 @@ def is_staff(member: discord.Member) -> bool:
     return any(r.id == STAFF_ROLE_ID for r in member.roles)
 
 
+def is_link_whitelisted(member: discord.Member) -> bool:
+    """Admins, the support/staff role, and individually whitelisted users
+    are allowed to post links."""
+    if member.guild_permissions.administrator:
+        return True
+    if any(r.id == STAFF_ROLE_ID for r in getattr(member, "roles", [])):
+        return True
+    if member.id in config.get("link_whitelist", []):
+        return True
+    return False
+
+
 def slugify(text: str) -> str:
     text = text.lower().strip()
     text = re.sub(r"[^a-z0-9]+", "-", text)
     return text.strip("-")[:20] or "ticket"
+
+
+# ============================================================
+#  MOD LOG HELPER
+# ============================================================
+async def mod_log(guild: discord.Guild, embed: discord.Embed):
+    ch = guild.get_channel(MOD_LOG_CHANNEL_ID)
+    if ch is None:
+        return
+    try:
+        await ch.send(embed=embed)
+    except discord.HTTPException:
+        pass
+
+
+# ============================================================
+#  LINK VIOLATION HANDLER
+# ============================================================
+async def handle_link_violation(message: discord.Message):
+    member = message.author
+    guild = message.guild
+
+    # Delete the offending message.
+    try:
+        await message.delete()
+    except discord.HTTPException:
+        pass
+
+    warns = config.setdefault("link_warnings", {})
+    uid = str(member.id)
+    warns[uid] = warns.get(uid, 0) + 1
+    count = warns[uid]
+    save_config(config)
+
+    if count >= LINK_WARN_LIMIT:
+        # Reset the counter so it's a fresh cycle after the punishment.
+        warns[uid] = 0
+        save_config(config)
+
+        timed_out = False
+        try:
+            await member.timeout(
+                timedelta(minutes=LINK_TIMEOUT_MINUTES),
+                reason="Link posting (warning limit reached)",
+            )
+            timed_out = True
+        except discord.HTTPException:
+            pass  # bot may lack Moderate Members perm or target is higher than bot
+
+        role_added = False
+        blk = guild.get_role(BLACKLIST_ROLE_ID)
+        if blk is not None:
+            try:
+                await member.add_roles(blk, reason="Link posting (warning limit reached)")
+                role_added = True
+            except discord.HTTPException:
+                pass  # bot may lack Manage Roles or blacklist role is above bot's top role
+
+        try:
+            await message.channel.send(
+                f"🚫 {member.mention} du wurdest wegen wiederholtem Link-Posten für "
+                f"{LINK_TIMEOUT_MINUTES:g} Minuten stummgeschaltet und auf die Blacklist gesetzt.",
+                delete_after=15,
+            )
+        except discord.HTTPException:
+            pass
+
+        embed = discord.Embed(
+            title="🚫 Link-Filter — Bestrafung",
+            color=0xE02B2B,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="User", value=f"{member.mention} (`{member.id}`)", inline=False)
+        embed.add_field(name="Channel", value=message.channel.mention, inline=True)
+        embed.add_field(name="Grund", value="Verwarnungslimit erreicht", inline=True)
+        embed.add_field(
+            name="Aktion",
+            value=(
+                f"{'✅' if timed_out else '❌'} Timeout {LINK_TIMEOUT_MINUTES:g} Min\n"
+                f"{'✅' if role_added else '❌'} Blacklist-Rolle vergeben"
+            ),
+            inline=False,
+        )
+        if not timed_out or not role_added:
+            embed.add_field(
+                name="⚠️ Hinweis",
+                value="Konnte nicht alles ausführen — prüfe die Bot-Rechte (Moderate Members / Manage Roles) und die Rollen-Hierarchie.",
+                inline=False,
+            )
+        await mod_log(guild, embed)
+    else:
+        try:
+            await message.channel.send(
+                f"⚠️ {member.mention} Links sind in diesem Channel nicht erlaubt. "
+                f"Verwarnung {count}/{LINK_WARN_LIMIT}.",
+                delete_after=10,
+            )
+        except discord.HTTPException:
+            pass
+
+        embed = discord.Embed(
+            title="⚠️ Link-Filter — Verwarnung",
+            color=0xF0A500,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="User", value=f"{member.mention} (`{member.id}`)", inline=False)
+        embed.add_field(name="Channel", value=message.channel.mention, inline=True)
+        embed.add_field(name="Verwarnung", value=f"{count}/{LINK_WARN_LIMIT}", inline=True)
+        await mod_log(guild, embed)
 
 
 # ============================================================
@@ -539,6 +685,16 @@ async def on_message(message: discord.Message):
     if message.author.bot or message.guild is None:
         return
 
+    # ---- LINK FILTER (runs before everything else) ----
+    if (
+        message.channel.id in LINK_FILTER_CHANNEL_IDS
+        and not is_link_whitelisted(message.author)
+        and LINK_REGEX.search(message.content or "")
+    ):
+        await handle_link_violation(message)
+        return  # stop here — offending message is gone, don't process as command
+
+    # ---- ticket activity tracking ----
     info = config["tickets"].get(str(message.channel.id))
     if info is not None:
         info["last_activity"] = datetime.now(timezone.utc).isoformat()
@@ -546,6 +702,97 @@ async def on_message(message: discord.Message):
         save_config(config)
 
     await bot.process_commands(message)
+
+
+# ============================================================
+#  PREFIX COMMANDS — LINK WHITELIST
+# ============================================================
+@bot.command(name="whitelistuser")
+async def whitelistuser(ctx: commands.Context, *, arg: str = None):
+    """$whitelistuser <ID oder @mention> — erlaubt diesem User, Links zu posten."""
+    if not is_staff(ctx.author):
+        await ctx.reply("❌ Nur Staff kann whitelisten.", mention_author=False)
+        return
+    if not arg:
+        await ctx.reply("Nutzung: `$whitelistuser <ID oder @mention>`", mention_author=False)
+        return
+
+    m = re.search(r"\d{15,}", arg)
+    if not m:
+        await ctx.reply("❌ Keine gültige User-ID gefunden.", mention_author=False)
+        return
+    uid = int(m.group())
+
+    wl = config.setdefault("link_whitelist", [])
+    if uid in wl:
+        await ctx.reply(f"ℹ️ <@{uid}> ist bereits gewhitelistet.", mention_author=False)
+        return
+
+    wl.append(uid)
+    # clear any pending warnings for this user
+    config.setdefault("link_warnings", {}).pop(str(uid), None)
+    save_config(config)
+
+    await ctx.reply(f"✅ <@{uid}> wurde zur Link-Whitelist hinzugefügt.", mention_author=False)
+
+    embed = discord.Embed(
+        title="✅ Link-Whitelist — hinzugefügt",
+        color=0x2ECC71,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="User", value=f"<@{uid}> (`{uid}`)", inline=False)
+    embed.add_field(name="Von", value=f"{ctx.author.mention}", inline=True)
+    await mod_log(ctx.guild, embed)
+
+
+@bot.command(name="unwhitelistuser")
+async def unwhitelistuser(ctx: commands.Context, *, arg: str = None):
+    """$unwhitelistuser <ID oder @mention> — entfernt den User wieder von der Whitelist."""
+    if not is_staff(ctx.author):
+        await ctx.reply("❌ Nur Staff kann das.", mention_author=False)
+        return
+    if not arg:
+        await ctx.reply("Nutzung: `$unwhitelistuser <ID oder @mention>`", mention_author=False)
+        return
+
+    m = re.search(r"\d{15,}", arg)
+    if not m:
+        await ctx.reply("❌ Keine gültige User-ID gefunden.", mention_author=False)
+        return
+    uid = int(m.group())
+
+    wl = config.setdefault("link_whitelist", [])
+    if uid not in wl:
+        await ctx.reply(f"ℹ️ <@{uid}> ist nicht auf der Whitelist.", mention_author=False)
+        return
+
+    wl.remove(uid)
+    save_config(config)
+    await ctx.reply(f"✅ <@{uid}> wurde von der Link-Whitelist entfernt.", mention_author=False)
+
+    embed = discord.Embed(
+        title="➖ Link-Whitelist — entfernt",
+        color=0xE67E22,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="User", value=f"<@{uid}> (`{uid}`)", inline=False)
+    embed.add_field(name="Von", value=f"{ctx.author.mention}", inline=True)
+    await mod_log(ctx.guild, embed)
+
+
+@bot.command(name="whitelist")
+async def whitelist_list(ctx: commands.Context):
+    """$whitelist — zeigt alle gewhitelisteten User."""
+    if not is_staff(ctx.author):
+        await ctx.reply("❌ Nur Staff.", mention_author=False)
+        return
+    wl = config.get("link_whitelist", [])
+    if not wl:
+        await ctx.reply("Die Whitelist ist leer.", mention_author=False)
+        return
+    lines = "\n".join(f"• <@{uid}> (`{uid}`)" for uid in wl)
+    embed = discord.Embed(title="📃 Link-Whitelist", description=lines, color=BRAND_COLOR)
+    await ctx.reply(embed=embed, mention_author=False)
 
 
 # ============================================================
@@ -641,6 +888,29 @@ async def cmd_tstatus(interaction: discord.Interaction):
         value=f"Warning {WARNING_HOURS_BEFORE:g}h before, close after {AUTO_CLOSE_HOURS:g}h of inactivity",
         inline=False,
     )
+
+    # ---- link filter status ----
+    if LINK_FILTER_CHANNEL_IDS:
+        chans = ", ".join(
+            (guild.get_channel(cid).mention if guild.get_channel(cid) else f"`{cid}` ⚠️")
+            for cid in LINK_FILTER_CHANNEL_IDS
+        )
+    else:
+        chans = "⚠️ Kein Channel gesetzt"
+    blk_role = guild.get_role(BLACKLIST_ROLE_ID)
+    mod_log_ch = guild.get_channel(MOD_LOG_CHANNEL_ID)
+    embed.add_field(
+        name="🔗 Link-Filter",
+        value=(
+            f"**Channels:** {chans}\n"
+            f"**Blacklist-Rolle:** {blk_role.mention if blk_role else '⚠️ Not set / invalid'}\n"
+            f"**Mod-Log:** {mod_log_ch.mention if mod_log_ch else '⚠️ Not set / invalid'}\n"
+            f"**Timeout:** {LINK_TIMEOUT_MINUTES:g} Min bei {LINK_WARN_LIMIT} Verwarnungen\n"
+            f"**Gewhitelistete User:** {len(config.get('link_whitelist', []))}"
+        ),
+        inline=False,
+    )
+
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
